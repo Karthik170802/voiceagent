@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Piper Voice Models & weights
+*.onnx
+*.onnx.json
+models/
+
+# OS and Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
