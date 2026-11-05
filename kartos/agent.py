@@ -26,7 +26,7 @@ from .config import Config
 from .metrics import MetricsLog
 from .player import Player
 from .providers import LLM, STT, TTS, resample
-from .turn import EndOfTurnDetector, classify
+from .turn import EndOfTurnDetector, classify, make_turn_detector
 from .vad import VAD
 
 
@@ -40,7 +40,7 @@ class VoiceAgent:
                  on_event: Callable[..., None] = _print_event):
         self.cfg, self.vad, self.stt, self.llm, self.tts, self.player = cfg, vad, stt, llm, tts, player
         self.on_event = on_event
-        self.eot = EndOfTurnDetector(cfg)
+        self.eot = make_turn_detector(cfg)
         self.metrics = MetricsLog()
         self.history: list[dict] = []
 
