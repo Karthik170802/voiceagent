@@ -21,6 +21,8 @@ htmlcov/
 *.onnx
 *.onnx.json
 models/
+eval_scenarios/
+*.wav
 
 # OS and Editor artifacts
 .DS_Store
