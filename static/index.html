@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kartOS Voice Client</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b6b6b;
+    --card: #f4f4f2;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --user-msg: #e0e7ff;
+    --agent-msg: #f3f4f6;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --border: #e5e7eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111827;
+      --fg: #f9fafb;
+      --muted: #9ca3af;
+      --card: #1f2937;
+      --accent: #3b82f6;
+      --accent-hover: #60a5fa;
+      --user-msg: #1e3a8a;
+      --agent-msg: #374151;
+      --danger: #ef4444;
+      --ok: #22c55e;
+      --border: #374151;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+  }
+  main {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 32px 20px 100px;
+  }
+  header {
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+  }
+  h1 { margin: 0 0 6px; font-size: 28px; font-weight: 700; }
+  .tagline { color: var(--muted); font-size: 15px; margin: 0; }
+  .controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  button {
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 22px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent);
+    color: #ffffff;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  button:hover { background: var(--accent-hover); }
+  button.stop { background: var(--danger); }
+  .badge {
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+  }
+  .badge.live { color: var(--ok); border-color: var(--ok); }
+  #log {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 280px;
+  }
+  .msg {
+    padding: 12px 16px;
+    border-radius: 14px;
+    max-width: 85%;
+    line-height: 1.5;
+    background: var(--agent-msg);
+    word-break: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user-msg);
+  }
+  .sys {
+    color: var(--muted);
+    font-size: 13px;
+    font-style: italic;
+    align-self: center;
+    margin: 4px 0;
+  }
+  #metrics-panel {
+    margin-top: 24px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--muted);
+    display: none;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>kartOS Voice Agent</h1>
+    <p class="tagline">Real-time bidirectional voice assistant. Low latency streaming, smart turn-taking, and barge-in.</p>
+  </header>
+
+  <div class="controls">
+    <button id="call-btn">Start call</button>
+    <span id="call-status" class="badge">idle</span>
+  </div>
+
+  <div id="log"></div>
+  <div id="metrics-panel"></div>
+</main>
+
+<script>
+const IN_RATE = 16000, OUT_RATE = 24000;
+const $ = id => document.getElementById(id);
+let ws = null, micCtx = null, outCtx = null, stream = null, workletNode = null;
+let nextTime = 0, sources = [], isLive = false;
+
+const workletSrc = `
+class Downsampler extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ratio = sampleRate / ${IN_RATE};
+    this.pos = 0;
+    this.acc = 0;
+    this.n = 0;
+    this.buf = [];
+  }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let k = 0; k < ch.length; k++) {
+      this.acc += ch[k];
+      this.n++;
+      this.pos++;
+      if (this.pos >= this.ratio) {
+        this.pos -= this.ratio;
+        const v = Math.max(-1, Math.min(1, this.acc / this.n));
+        this.acc = 0;
+        this.n = 0;
+        this.buf.push(Math.round(v * 32767));
+        if (this.buf.length >= 320) {
+          this.port.postMessage(new Int16Array(this.buf));
+          this.buf = [];
+        }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('downsampler', Downsampler);
+`;
+
+function appendMsg(text, isUser) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + (isUser ? 'user' : '');
+  d.textContent = text;
+  $('log').appendChild(d);
+  d.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function appendSys(text) {
+  const d = document.createElement('div');
+  d.className = 'sys';
+  d.textContent = text;
+  $('log').appendChild(d);
+  d.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function setStatus(text, live = false) {
+  const el = $('call-status');
+  el.textContent = text;
+  el.className = 'badge ' + (live ? 'live' : '');
+}
+
+function playPcm(buffer) {
+  if (!outCtx) return;
+  const i16 = new Int16Array(buffer);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+
+  const audioBuf = outCtx.createBuffer(1, f32.length, OUT_RATE);
+  audioBuf.copyToChannel(f32, 0);
+
+  const src = outCtx.createBufferSource();
+  src.buffer = audioBuf;
+  src.connect(outCtx.destination);
+
+  const at = Math.max(outCtx.currentTime + 0.02, nextTime);
+  src.start(at);
+  nextTime = at + audioBuf.duration;
+
+  sources.push(src);
+  src.onended = () => { sources = sources.filter(s => s !== src); };
+}
+
+function stopPlayback() {
+  sources.forEach(s => { try { s.stop(); } catch (e) {} });
+  sources = [];
+  nextTime = 0;
+}
+
+function handleEvent(ev) {
+  switch (ev.name) {
+    case 'speech_start': setStatus('listening…', true); break;
+    case 'user': appendMsg(ev.text, true); setStatus('thinking…', true); break;
+    case 'agent': appendMsg(ev.text, false); setStatus('speaking…', true); break;
+    case 'duck': setStatus('listening…', true); break;
+    case 'backchannel': appendSys('(murmur noted, agent resumes)'); break;
+    case 'interrupted': stopPlayback(); appendSys('(user interrupted)'); setStatus('listening…', true); break;
+    case 'merged': appendSys('(merged with earlier speech)'); break;
+    case 'error': appendSys('Error: ' + ev.error); break;
+    case 'metrics':
+      const p = $('metrics-panel');
+      p.style.display = 'block';
+      const detail = Object.entries(ev)
+        .filter(([k]) => !['type', 'name', 'TOTAL'].includes(k))
+        .map(([k, v]) => `${k}: ${v}ms`)
+        .join(' | ');
+      p.innerHTML = `<strong>Response Latency:</strong> ${ev.TOTAL} ms &nbsp;(${detail})`;
+      break;
+  }
+}
+
+async function startCall() {
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+  });
+  outCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUT_RATE });
+  micCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  const blob = new Blob([workletSrc], { type: 'application/javascript' });
+  const blobUrl = URL.createObjectURL(blob);
+  await micCtx.audioWorklet.addModule(blobUrl);
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error('WebSocket connection failed'));
+  });
+
+  workletNode = new AudioWorkletNode(micCtx, 'downsampler');
+  workletNode.port.onmessage = e => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(e.data.buffer);
+    }
+  };
+
+  micCtx.createMediaStreamSource(stream).connect(workletNode);
+
+  ws.onmessage = e => {
+    if (typeof e.data === 'string') {
+      try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
+    } else {
+      playPcm(e.data);
+    }
+  };
+
+  ws.onclose = () => { if (isLive) endCall(); };
+
+  isLive = true;
+  setStatus('connected', true);
+  appendSys('Call connected. Speak into your microphone.');
+  $('call-btn').textContent = 'End call';
+  $('call-btn').className = 'stop';
+}
+
+function endCall() {
+  isLive = false;
+  try { ws && ws.close(); } catch (e) {}
+  try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { micCtx && micCtx.close(); outCtx && outCtx.close(); } catch (e) {}
+  stopPlayback();
+  setStatus('idle', false);
+  appendSys('Call ended.');
+  $('call-btn').textContent = 'Start call';
+  $('call-btn').className = '';
+}
+
+$('call-btn').onclick = async () => {
+  if (isLive) {
+    endCall();
+  } else {
+    try {
+      await startCall();
+    } catch (err) {
+      appendSys('Failed to start call: ' + err.message + ' (Mic requires HTTPS or localhost)');
+      endCall();
+    }
+  }
+};
+</script>
+</body>
+</html>
