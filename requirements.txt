@@ -1,0 +1,8 @@
+numpy
+anthropic            # LLM (set ANTHROPIC_API_KEY)
+faster-whisper       # local STT
+sounddevice          # mic + speaker
+silero-vad           # optional, better VAD (falls back to energy VAD)
+piper-tts            # local TTS CLI; download a voice .onnx + .json from the Piper voices repo
+pytest               # tests
+aiohttp             # web front end server
